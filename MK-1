@@ -1,0 +1,1194 @@
+/*
+ * =============================================================
+ *   CodeForge AI  v1.0
+ *   A local semantic AI that turns your English into C++ code
+ *   and shows you the output (ASCII art + math) instantly.
+ *
+ *   Examples to type at the prompt:
+ *     "draw a square of size 6"
+ *     "hollow triangle size 8"
+ *     "sqrt of 144"
+ *     "pow 2 to the 10"
+ *     "fibonacci up to 10 terms"
+ *     "is 29 a prime number"
+ *     "multiplication table of 12"
+ *
+ *   Everything runs locally - no internet, no API keys,
+ *   pure C++17 on your own machine power.
+ * =============================================================
+ */
+
+#include <iostream>
+#include <string>
+#include <sstream>
+#include <vector>
+#include <cmath>
+#include <cctype>
+#include <iomanip>
+#include <algorithm>
+#include <functional>
+#include <limits>
+
+using namespace std;
+
+/* ======================= TYPES & ENUMS ======================= */
+
+/* Every thing CodeForge can understand is an "intent". */
+enum class Intent {
+    SQUARE,       // square shape
+    RECTANGLE,    // rectangle / box
+    TRIANGLE,     // triangle / pyramid
+    DIAMOND,      // diamond / rhombus
+    CIRCLE,       // circle
+    STAR,         // star shape
+    PATTERN,      // number / letter patterns
+    SQRT,         // square root
+    POW,          // power
+    FACTORIAL,    // factorial
+    FIBONACCI,    // fibonacci series
+    TIMES_TABLE,  // multiplication table
+    PRIME,        // prime check / prime list
+    CALCULATOR,   // general math expression
+    HELLO,        // hello world variants
+    HELP,         // show help
+    QUIT,         // goodbye
+    UNKNOWN       // could not understand
+};
+
+/* Small data holder for a parsed request. */
+struct Request {
+    Intent intent = Intent::UNKNOWN;
+    double   num1   = 0;        // main size / first number
+    double   num2   = 0;        // second number (e.g. pow exponent, width)
+    bool     hollow = false;    // hollow shape variant
+    char     fill   = '*';      // drawing character
+    string   raw;               // the original sentence
+};
+
+/* ======================= UTILITY FUNCTIONS ======================= */
+
+/* Convert a whole string to lowercase (for case-insensitive matching). */
+string toLower(const string& s) {
+    string out = s;
+    for (char& c : out) c = static_cast<char>(tolower(c));
+    return out;
+}
+
+/* Break a sentence into clean lowercase words. */
+vector<string> tokenize(const string& sentence) {
+    vector<string> words;
+    string cleaned = toLower(sentence);
+    /* remove punctuation so "size 6," becomes "size 6" */
+    string buffer;
+    for (char c : cleaned) {
+        if (isalnum(c) || c == ' ') buffer += c;
+        else                        buffer += ' ';
+    }
+    istringstream stream(buffer);
+    string word;
+    while (stream >> word) words.push_back(word);
+    return words;
+}
+
+/* Does the word list contain any of the given keywords? */
+bool hasWord(const vector<string>& words, const vector<string>& keywords) {
+    for (const string& w : words)
+        for (const string& k : keywords)
+            if (w == k) return true;
+    return false;
+}
+
+/* Count how many keywords from the list appear in the words. */
+int countWords(const vector<string>& words, const vector<string>& keywords) {
+    int hits = 0;
+    for (const string& w : words)
+        for (const string& k : keywords)
+            if (w == k) hits++;
+    return hits;
+}
+
+/* Extract every integer-like number written in the sentence (in order). */
+vector<double> extractNumbers(const string& sentence) {
+    vector<double> nums;
+    string buffer;
+    for (char c : sentence) {
+        if (isdigit(c) || c == '.') buffer += c;
+        else {
+            if (!buffer.empty()) { nums.push_back(stod(buffer)); buffer.clear(); }
+        }
+    }
+    if (!buffer.empty()) nums.push_back(stod(buffer));
+    return nums;
+}
+
+/* Extract the first number that appears right after a keyword phrase.
+   e.g. "square of size 6"   -> after "size" we find 6
+        "pow 2 to the 10"    -> 2 then 10                       */
+vector<double> extractAfterKeyword(const vector<string>& words,
+                                   const vector<string>& keywords) {
+    vector<double> nums;
+    for (size_t i = 0; i < words.size(); i++) {
+        for (const string& k : keywords) {
+            if (words[i] == k && i + 1 < words.size() &&
+                isdigit(words[i + 1][0])) {
+                nums.push_back(stod(words[i + 1]));
+                break;
+            }
+        }
+    }
+    return nums;
+}
+
+/* ================================================================
+   SECTION 1 - SEMANTIC PARSER
+   Reads English, decides what you want (intent) and pulls out the
+   numbers/parameters you mentioned.
+   ================================================================ */
+
+class ForgeParser {
+public:
+    Request parse(const string& sentence) {
+        Request req;
+        req.raw = sentence;
+        words = tokenize(sentence);
+
+        if (words.empty()) { req.intent = Intent::UNKNOWN; return req; }
+
+        /* Quit words */
+        if (hasWord(words, {"quit", "exit", "bye", "stop"})) {
+            req.intent = Intent::QUIT; return req;
+        }
+        /* Help words */
+        if (hasWord(words, {"help", "what", "can", "commands", "list"})) {
+            req.intent = Intent::HELP; return req;
+        }
+        /* Greeting words */
+        if (hasWord(words, {"hello", "hi", "hey", "greet"})) {
+            req.intent = Intent::HELLO; return req;
+        }
+
+        classifyShapes(req);
+        classifyMath(req);
+        classifyPatterns(req);
+        classifyPrimes(req);
+        classifyCalculator(req);
+
+        return req;
+    }
+
+private:
+    vector<string> words;
+
+    /* ---------- SHAPE INTENTS ---------- */
+    void classifyShapes(Request& req) {
+        bool wantsSquare    = hasWord(words, {"square"});
+        bool wantsRectangle = hasWord(words, {"rectangle", "box", "rect"});
+        bool wantsTriangle  = hasWord(words, {"triangle", "pyramid", "cone"});
+        bool wantsDiamond   = hasWord(words, {"diamond", "rhombus", "kite"});
+        bool wantsCircle    = hasWord(words, {"circle", "round", "ring", "oval"});
+        bool wantsStar      = hasWord(words, {"star"});
+        bool wantsShape     = wantsSquare || wantsRectangle || wantsTriangle ||
+                              wantsDiamond || wantsCircle || wantsStar;
+
+        if (!wantsShape) return;
+
+        req.hollow = hasWord(words, {"hollow", "outline", "border"});
+
+        /* fill character: "with x" / "of x" / "using x" / "made of x" */
+        vector<string> markers = {"with", "of", "using", "made", "char"};
+        for (size_t i = 0; i + 1 < words.size(); i++) {
+            if (hasWord({words[i]}, markers) && words[i + 1].size() == 1 &&
+                !isdigit(words[i + 1][0])) {
+                req.fill = words[i + 1][0];
+                break;
+            }
+        }
+
+        /* prefer numbers after "size" / "of" / "sized", else any numbers */
+        vector<double> after = extractAfterKeyword(words,
+            {"size", "sized", "of", "length", "side", "rows", "high", "tall", "wide"});
+
+        /* size / dimensions */
+        if (wantsSquare) {
+            req.intent = Intent::SQUARE;
+            req.num1 = after.empty() ? 6 : after[0];
+        } else if (wantsRectangle) {
+            req.intent = Intent::RECTANGLE;
+            if (after.size() >= 2) { req.num1 = after[0]; req.num2 = after[1]; }
+            else                     { req.num1 = 5;      req.num2 = 9; }
+        } else if (wantsTriangle) {
+            req.intent = Intent::TRIANGLE;
+            req.num1 = after.empty() ? 6 : after[0];
+        } else if (wantsDiamond) {
+            req.intent = Intent::DIAMOND;
+            req.num1 = after.empty() ? 5 : after[0];
+        } else if (wantsCircle) {
+            req.intent = Intent::CIRCLE;
+            req.num1 = after.empty() ? 5 : after[0];
+        } else if (wantsStar) {
+            req.intent = Intent::STAR;
+            req.num1 = after.empty() ? 5 : after[0];
+        }
+    }
+
+    /* ---------- MATH INTENTS (sqrt, pow, factorial, fib) ---------- */
+    void classifyMath(Request& req) {
+        bool wantsSqrt = hasWord(words, {"sqrt", "root", "squareroot", "radical"});
+        bool wantsPow  = hasWord(words, {"pow", "power", "raised", "exponent",
+                                         "cube", "squared"});
+        bool wantsFact = hasWord(words, {"factorial", "fact", "factorials"});
+        bool wantsFib  = hasWord(words, {"fibonacci", "fib", "fibonacci series",
+                                         "fib series"});
+        bool wantsTimes= hasWord(words, {"table", "tables", "times", "multiply"});
+
+        vector<double> nums = extractNumbers(req.raw);
+
+        if (wantsSqrt) {
+            req.intent = Intent::SQRT;
+            req.num1 = nums.empty() ? 0 : nums[0];
+        }
+        else if (wantsPow) {
+            req.intent = Intent::POW;
+            /* "pow 2 to the 10" -> nums = {2, 10} */
+            if (nums.size() >= 2) { req.num1 = nums[0]; req.num2 = nums[1]; }
+            else if (nums.size() == 1) {
+                /* "cube of 4" -> 4^3 ; "square of 9" -> 9^2 */
+                bool cube  = hasWord(words, {"cube", "cubed", "cubic"});
+                req.num1   = nums[0];
+                req.num2   = cube ? 3 : 2;
+            } else { req.num1 = 2; req.num2 = 8; }
+        }
+        else if (wantsFact) {
+            req.intent = Intent::FACTORIAL;
+            req.num1 = nums.empty() ? 6 : nums[0];
+        }
+        else if (wantsFib) {
+            req.intent = Intent::FIBONACCI;
+            req.num1 = nums.empty() ? 10 : nums[0];
+        }
+        else if (wantsTimes) {
+            req.intent = Intent::TIMES_TABLE;
+            req.num1 = nums.empty() ? 7 : nums[0];
+        }
+    }
+
+    /* ---------- PATTERN INTENTS ---------- */
+    void classifyPatterns(Request& req) {
+        bool wantsPattern = hasWord(words, {"pattern", "number", "letter", "countdown",
+                                            "counting", "sequence", "floyd"});
+        if (!wantsPattern) return;
+        req.intent = Intent::PATTERN;
+        vector<double> nums = extractNumbers(req.raw);
+        req.num1 = nums.empty() ? 5 : nums[0];
+        req.num2 = 0;
+        if (hasWord(words, {"floyd"}))              req.num2 = 1;   // Floyd triangle
+        if (hasWord(words, {"countdown", "reverse"})) req.num2 = 2; // countdown
+        if (hasWord(words, {"letter", "alphabet"}))   req.num2 = 3; // letter pattern
+    }
+
+    /* ---------- PRIME INTENTS ---------- */
+    void classifyPrimes(Request& req) {
+        bool wantsPrime = hasWord(words, {"prime"});
+        if (!wantsPrime) return;
+        req.intent = Intent::PRIME;
+        vector<double> nums = extractNumbers(req.raw);
+        req.num1 = nums.empty() ? 29 : nums[0];
+    }
+
+    /* ---------- GENERAL CALCULATOR FALLBACK ---------- */
+    void classifyCalculator(Request& req) {
+        bool wantsCalc = hasWord(words, {"calculate", "compute", "evaluate",
+                                         "what", "solve", "calculate"});
+        bool hasOperator = false;
+        for (const string& w : words)
+            if (w == "+" || w == "-" || w == "x" || w == "*" ||
+                w == "/" || w == "%" || w == "plus" || w == "minus" ||
+                w == "times" || w == "divided" || w == "over" || w == "into")
+                hasOperator = true;
+
+        vector<double> nums = extractNumbers(req.raw);
+
+        if ((wantsCalc || hasOperator) && nums.size() >= 2) {
+            req.intent = Intent::CALCULATOR;
+            req.num1 = nums[0];
+            req.num2 = nums[1];
+            req.hollow = hasWord(words, {"plus", "+", "add", "sum"});
+            /* hollow flag doubles as "which operator" here:
+               true  -> + ,  else check minus/times/divide           */
+            if (hasWord(words, {"minus", "-", "subtract", "difference"}))
+                req.num2 = -1;  // special marker: subtract
+            if (hasWord(words, {"times", "x", "*", "multiply", "product", "into"}))
+                req.num2 = -2;  // special marker: multiply
+            if (hasWord(words, {"divide", "/", "divided", "over", "quotient"}))
+                req.num2 = -3;  // special marker: divide
+            if (hasWord(words, {"mod", "remainder", "%"}))
+                req.num2 = -4;  // special marker: modulo
+            if (hasWord(words, {"sin"})) req.num2 = -5;   // sin(num1)
+            if (hasWord(words, {"cos"})) req.num2 = -6;   // cos(num1)
+            if (hasWord(words, {"tan"})) req.num2 = -7;   // tan(num1)
+        } else if (nums.size() >= 2 && hasOperator) {
+            req.intent = Intent::CALCULATOR;
+            req.num1 = nums[0];
+            req.num2 = nums[1];
+            if (hasWord(words, {"minus", "-", "subtract"})) req.num2 = -1;
+            if (hasWord(words, {"times", "x", "*", "multiply", "product"})) req.num2 = -2;
+            if (hasWord(words, {"divide", "/", "divided", "over"})) req.num2 = -3;
+            if (hasWord(words, {"mod", "remainder", "%"})) req.num2 = -4;
+            if (hasWord(words, {"sin"})) req.num2 = -5;
+            if (hasWord(words, {"cos"})) req.num2 = -6;
+            if (hasWord(words, {"tan"})) req.num2 = -7;
+        }
+    }
+};
+/* ================================================================
+   SECTION 2 - CODE GENERATOR
+   Takes a parsed Request and writes a complete, runnable C++ program
+   as text. This text is what the AI "gives" you to copy and compile.
+   ================================================================ */
+
+class CodeForge {
+public:
+    string generate(const Request& req) {
+        switch (req.intent) {
+            case Intent::SQUARE:      return genSquare(req);
+            case Intent::RECTANGLE:   return genRectangle(req);
+            case Intent::TRIANGLE:    return genTriangle(req);
+            case Intent::DIAMOND:     return genDiamond(req);
+            case Intent::CIRCLE:      return genCircle(req);
+            case Intent::STAR:        return genStar(req);
+            case Intent::PATTERN:     return genPattern(req);
+            case Intent::SQRT:        return genSqrt(req);
+            case Intent::POW:         return genPow(req);
+            case Intent::FACTORIAL:   return genFactorial(req);
+            case Intent::FIBONACCI:   return genFibonacci(req);
+            case Intent::TIMES_TABLE: return genTimesTable(req);
+            case Intent::PRIME:       return genPrime(req);
+            case Intent::CALCULATOR:  return genCalculator(req);
+            case Intent::HELLO:       return genHello(req);
+            default:                  return "";
+        }
+    }
+
+private:
+    /* helpers for numbers with decimals or whole */
+    static string fmt(double v) {
+        if (v == floor(v) && fabs(v) < 1e9)
+            return to_string(static_cast<long long>(v));
+        stringstream ss; ss << fixed << setprecision(2) << v; return ss.str();
+    }
+    static string fmtInt(double v) { return to_string(static_cast<int>(v)); }
+
+    /* ---------- SHAPE GENERATORS ---------- */
+    string genSquare(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        if (r.hollow) {
+            return
+"// CodeForge AI generated: HOLLOW SQUARE (size " + fmtInt(n) + ", char '" + r.fill + "')\n"
+"// Copy this code, compile and run it to see your square!\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";          // size of the square\n"
+"    char ch = '" + string(1, r.fill) + "'; // drawing character\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        for (int j = 1; j <= n; j++) {\n"
+"            // print character only on the border lines\n"
+"            if (i == 1 || i == n || j == 1 || j == n)\n"
+"                cout << ch << \" \";\n"
+"            else\n"
+"                cout << \"  \";\n"
+"        }\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+        }
+        return
+"// CodeForge AI generated: SOLID SQUARE (size " + fmtInt(n) + ", char '" + r.fill + "')\n"
+"// Copy this code, compile and run it to see your square!\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";          // size of the square\n"
+"    char ch = '" + string(1, r.fill) + "'; // drawing character\n"
+"    for (int i = 1; i <= n; i++) {\n"          // for every row
+"        for (int j = 1; j <= n; j++) {  // for every column\n"
+"            cout << ch << \" \";\n"
+"        }\n"
+"        cout << endl;                   // new line after each row\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genRectangle(const Request& r) {
+        int h = max(2, static_cast<int>(r.num1));
+        int w = max(3, static_cast<int>(r.num2));
+        return
+"// CodeForge AI generated: RECTANGLE (" + fmtInt(h) + " rows x " + fmtInt(w) + " columns)\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int rows = " + fmtInt(h) + ";   // height\n"
+"    int cols = " + fmtInt(w) + ";   // width\n"
+"    char ch = '" + string(1, r.fill) + "';\n"
+"    for (int i = 1; i <= rows; i++) {\n"
+"        for (int j = 1; j <= cols; j++) {\n"
+"            cout << ch << \" \";\n"
+"        }\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genTriangle(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        if (r.hollow) {
+            return
+"// CodeForge AI generated: HOLLOW TRIANGLE (size " + fmtInt(n) + ")\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    char ch = '" + string(1, r.fill) + "';\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        for (int j = 1; j <= n - i; j++) cout << \"  \";   // leading spaces\n"
+"        for (int k = 1; k <= 2 * i - 1; k++) {\n"
+"            if (i == n || k == 1 || k == 2 * i - 1)\n"
+"                cout << ch << \" \";\n"
+"            else\n"
+"                cout << \"  \";\n"
+"        }\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+        }
+        return
+"// CodeForge AI generated: TRIANGLE (size " + fmtInt(n) + ")\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    char ch = '" + string(1, r.fill) + "';\n"
+"    for (int i = 1; i <= n; i++) {            // each row\n"
+"        for (int j = 1; j <= n - i; j++)      // leading spaces\n"
+"            cout << \"  \";\n"
+"        for (int k = 1; k <= 2 * i - 1; k++)  // stars grow by 2 each row\n"
+"            cout << ch << \" \";\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genDiamond(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        return
+"// CodeForge AI generated: DIAMOND (radius " + fmtInt(n) + ")\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    char ch = '" + string(1, r.fill) + "';\n"
+"    // top half (including middle row)\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        for (int j = 1; j <= n - i; j++) cout << \"  \";\n"
+"        for (int k = 1; k <= 2 * i - 1; k++) cout << ch << \" \";\n"
+"        cout << endl;\n"
+"    }\n"
+"    // bottom half\n"
+"    for (int i = n - 1; i >= 1; i--) {\n"
+"        for (int j = 1; j <= n - i; j++) cout << \"  \";\n"
+"        for (int k = 1; k <= 2 * i - 1; k++) cout << ch << \" \";\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genCircle(const Request& r) {
+        int rad = max(2, static_cast<int>(r.num1));
+        return
+"// CodeForge AI generated: CIRCLE (radius " + fmtInt(rad) + ") using the circle equation x^2 + y^2 = r^2\n"
+"#include <iostream>\n"
+"#include <cmath>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int r = " + fmtInt(rad) + ";\n"
+"    char ch = '" + string(1, r.fill) + "';\n"
+"    // scan a square grid from -r to +r and mark points near the circle edge\n"
+"    for (int y = r; y >= -r; y--) {\n"
+"        for (int x = -2 * r; x <= 2 * r; x++) {   // x stretched 2x for round look\n"
+"            double dist = sqrt((x / 2.0) * (x / 2.0) + y * y);\n"
+"            if (fabs(dist - r) <= 1.0)\n"
+"                cout << ch;\n"
+"            else\n"
+"                cout << \" \";\n"
+"        }\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genStar(const Request& r) {
+        int n = max(3, static_cast<int>(r.num1));
+        return
+"// CodeForge AI generated: " + fmtInt(n) + "-POINTED STAR (made of two triangles)\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";   // controls the star size\n"
+"    char ch = '" + string(1, r.fill) + "';\n"
+"    // top triangle\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        for (int j = 1; j <= n - i; j++) cout << \" \";\n"
+"        for (int k = 1; k <= 2 * i - 1; k++) cout << ch;\n"
+"        cout << endl;\n"
+"    }\n"
+"    // bottom triangle\n"
+"    for (int i = n - 1; i >= 1; i--) {\n"
+"        for (int j = 1; j <= n - i; j++) cout << \" \";\n"
+"        for (int k = 1; k <= 2 * i - 1; k++) cout << ch;\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    /* ---------- MATH GENERATORS ---------- */
+    string genSqrt(const Request& r) {
+        return
+"// CodeForge AI generated: SQUARE ROOT of " + fmt(r.num1) + " using sqrt()\n"
+"#include <iostream>\n"
+"#include <cmath>     // gives us the sqrt() function\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double number = " + fmt(r.num1) + ";\n"
+"    double answer = sqrt(number);   // sqrt() from <cmath>\n"
+"    cout << \"The square root of \" << number << \" is \" << answer << endl;\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genPow(const Request& r) {
+        return
+"// CodeForge AI generated: POWER " + fmt(r.num1) + " ^ " + fmt(r.num2) + " using pow()\n"
+"#include <iostream>\n"
+"#include <cmath>     // gives us the pow() function\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double base     = " + fmt(r.num1) + ";\n"
+"    double exponent = " + fmt(r.num2) + ";\n"
+"    double answer = pow(base, exponent);   // pow(base, exponent)\n"
+"    cout << base << \" raised to the power \" << exponent << \" is \" << answer << endl;\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genFactorial(const Request& r) {
+        int n = max(0, static_cast<int>(r.num1));
+        return
+"// CodeForge AI generated: FACTORIAL of " + fmtInt(n) + " (!)\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    long long fact = 1;                // long long holds big results\n"
+"    cout << n << \"! = \";\n"
+"    for (int i = n; i >= 1; i--) {     // multiply n * (n-1) * ... * 1\n"
+"        fact *= i;\n"
+"        cout << i << (i > 1 ? \" x \" : \" = \");\n"
+"    }\n"
+"    cout << fact << endl;\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genFibonacci(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        return
+"// CodeForge AI generated: FIBONACCI SERIES (" + fmtInt(n) + " terms)\n"
+"// Each number is the sum of the two before it: 0 1 1 2 3 5 8 ...\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    long long a = 0, b = 1;\n"
+"    cout << \"Fibonacci series: \";\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        cout << a << (i < n ? \", \" : \"\\n\");\n"
+"        long long next = a + b;        // the core rule\n"
+"        a = b;\n"
+"        b = next;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genTimesTable(const Request& r) {
+        int n = max(1, static_cast<int>(r.num1));
+        return
+"// CodeForge AI generated: MULTIPLICATION TABLE of " + fmtInt(n) + "\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    cout << \"Multiplication table of \" << n << \":\\n\";\n"
+"    for (int i = 1; i <= 10; i++) {\n"
+"        cout << n << \" x \" << i << \" = \" << n * i << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genPrime(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        /* If the user said "list" / "all" / "upto", generate a list to n. */
+        vector<string> dummy = tokenize(r.raw);
+        bool listMode = hasWord(dummy, {"list", "all", "upto", "up", "to", "till", "until", "below"});
+        if (listMode) {
+            return
+"// CodeForge AI generated: ALL PRIME NUMBERS up to " + fmtInt(n) + "\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int limit = " + fmtInt(n) + ";\n"
+"    cout << \"Primes up to \" << limit << \":\\n\";\n"
+"    for (int num = 2; num <= limit; num++) {\n"
+"        bool isPrime = true;\n"
+"        for (int i = 2; i * i <= num; i++) {   // only check up to sqrt(num)\n"
+"            if (num % i == 0) { isPrime = false; break; }\n"
+"        }\n"
+"        if (isPrime) cout << num << \" \";\n"
+"    }\n"
+"    cout << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        return
+"// CodeForge AI generated: PRIME CHECK for " + fmtInt(n) + "\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int num = " + fmtInt(n) + ";\n"
+"    bool isPrime = true;\n"
+"    if (num < 2) isPrime = false;\n"
+"    for (int i = 2; i * i <= num; i++) {       // check divisors up to sqrt(num)\n"
+"        if (num % i == 0) { isPrime = false; break; }\n"
+"    }\n"
+"    cout << num << (isPrime ? \" is a PRIME number.\" : \" is NOT a prime number.\") << endl;\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genCalculator(const Request& r) {
+        /* num2 negative = operation marker (see parser) */
+        if (r.num2 == -5) {
+            return
+"// CodeForge AI generated: sin(" + fmt(r.num1) + ") using sin()\n"
+"#include <iostream>\n"
+"#include <cmath>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double x = " + fmt(r.num1) + ";\n"
+"    cout << \"sin(\" << x << \") = \" << sin(x) << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (r.num2 == -6) {
+            return
+"// CodeForge AI generated: cos(" + fmt(r.num1) + ") using cos()\n"
+"#include <iostream>\n"
+"#include <cmath>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double x = " + fmt(r.num1) + ";\n"
+"    cout << \"cos(\" << x << \") = \" << cos(x) << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (r.num2 == -7) {
+            return
+"// CodeForge AI generated: tan(" + fmt(r.num1) + ") using tan()\n"
+"#include <iostream>\n"
+"#include <cmath>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double x = " + fmt(r.num1) + ";\n"
+"    cout << \"tan(\" << x << \") = \" << tan(x) << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (r.num2 == -1) {
+            return
+"// CodeForge AI generated: " + fmt(r.num1) + " - " + fmt(-r.num2 == 1 ? 0 : 0) + " ... subtraction\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double a = " + fmt(r.num1) + ", b = " + fmt(-r.num2 == 1 ? 0 : 0) + ";\n"
+"    cout << a << \" - \" << b << \" = \" << a - b << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (r.num2 == -2) {
+            return
+"// CodeForge AI generated: " + fmt(r.num1) + " x " + fmt(-r.num2 == 2 ? 0 : 0) + " ... multiplication\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double a = " + fmt(r.num1) + ", b = " + fmt(-r.num2 == 2 ? 0 : 0) + ";\n"
+"    cout << a << \" x \" << b << \" = \" << a * b << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (r.num2 == -3) {
+            return
+"// CodeForge AI generated: division of " + fmt(r.num1) + " / " + fmt(-r.num2 == 3 ? 0 : 0) + "\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double a = " + fmt(r.num1) + ", b = " + fmt(-r.num2 == 3 ? 0 : 0) + ";\n"
+"    if (b == 0) cout << \"Cannot divide by zero!\" << endl;\n"
+"    else cout << a << \" / \" << b << \" = \" << a / b << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (r.num2 == -4) {
+            return
+"// CodeForge AI generated: remainder of " + fmt(r.num1) + " % " + fmt(-r.num2 == 4 ? 0 : 0) + "\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int a = " + fmtInt(r.num1) + ", b = " + fmtInt(-r.num2 == 4 ? 0 : 0) + ";\n"
+"    cout << a << \" % \" << b << \" = \" << a % b << endl;\n"
+"    return 0;\n"
+"}\n";
+        }
+        /* default: addition */
+        return
+"// CodeForge AI generated: " + fmt(r.num1) + " + " + fmt(r.num2) + " ... addition\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    double a = " + fmt(r.num1) + ", b = " + fmt(r.num2) + ";\n"
+"    cout << a << \" + \" << b << \" = \" << a + b << endl;\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genPattern(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        int type = static_cast<int>(r.num2);
+        if (type == 2) {
+            return
+"// CodeForge AI generated: COUNTDOWN PATTERN from " + fmtInt(n) + "\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    for (int i = n; i >= 1; i--) {\n"
+"        for (int j = 1; j <= i; j++)\n"
+"            cout << j << \" \";\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (type == 3) {
+            return
+"// CodeForge AI generated: LETTER PATTERN (first " + fmtInt(n) + " letters)\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        for (int j = 1; j <= i; j++)\n"
+"            cout << (char)('A' + j - 1) << \" \";\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+        }
+        if (type == 1) {
+            return
+"// CodeForge AI generated: FLOYD'S TRIANGLE (" + fmtInt(n) + " rows)\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ", counter = 1;\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        for (int j = 1; j <= i; j++)\n"
+"            cout << counter++ << \" \";\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+        }
+        return
+"// CodeForge AI generated: NUMBER PATTERN (" + fmtInt(n) + " rows)\n"
+"// 1\n"
+"// 2 2\n"
+"// 3 3 3 ...\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    int n = " + fmtInt(n) + ";\n"
+"    for (int i = 1; i <= n; i++) {\n"
+"        for (int j = 1; j <= i; j++)\n"
+"            cout << i << \" \";\n"
+"        cout << endl;\n"
+"    }\n"
+"    return 0;\n"
+"}\n";
+    }
+
+    string genHello(const Request& /*r*/) {
+        return
+"// CodeForge AI generated: HELLO WORLD - the classic first program!\n"
+"#include <iostream>\n"
+"using namespace std;\n"
+"int main() {\n"
+"    cout << \"Hello, World!\" << endl;\n"
+"    cout << \"I am learning C++ with CodeForge AI.\" << endl;\n"
+"    return 0;\n"
+"}\n";
+    }
+};
+/* ================================================================
+   SECTION 3 - ASCII ARTIST  (ForgeArtist)
+   Draws the OUTPUT right now so you can see what your generated
+   code will print. It mirrors exactly what the generated code does.
+   ================================================================ */
+
+class ForgeArtist {
+public:
+    void draw(const Request& req) {
+        cout << "\n" + string(60, '-') + "\n";
+        cout << "  PREVIEW - this is what your code will print:\n";
+        cout << string(60, '-') + "\n";
+
+        switch (req.intent) {
+            case Intent::SQUARE:      drawSquare(req);  break;
+            case Intent::RECTANGLE:   drawRectangle(req); break;
+            case Intent::TRIANGLE:    drawTriangle(req); break;
+            case Intent::DIAMOND:     drawDiamond(req); break;
+            case Intent::CIRCLE:      drawCircle(req); break;
+            case Intent::STAR:        drawStar(req); break;
+            case Intent::PATTERN:     drawPattern(req); break;
+            case Intent::SQRT:        drawSqrt(req); break;
+            case Intent::POW:         drawPow(req); break;
+            case Intent::FACTORIAL:   drawFactorial(req); break;
+            case Intent::FIBONACCI:   drawFibonacci(req); break;
+            case Intent::TIMES_TABLE: drawTimesTable(req); break;
+            case Intent::PRIME:       drawPrime(req); break;
+            case Intent::CALCULATOR:  drawCalculator(req); break;
+            case Intent::HELLO:       drawHello(req); break;
+            default:                  break;
+        }
+        cout << string(60, '-') + "\n\n";
+    }
+
+private:
+    /* ---------- shape drawing ---------- */
+    void drawSquare(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        for (int i = 1; i <= n; i++) {
+            for (int j = 1; j <= n; j++) {
+                if (!r.hollow || i == 1 || i == n || j == 1 || j == n)
+                    cout << r.fill << " ";
+                else
+                    cout << "  ";
+            }
+            cout << "\n";
+        }
+    }
+
+    void drawRectangle(const Request& r) {
+        int h = max(2, static_cast<int>(r.num1));
+        int w = max(3, static_cast<int>(r.num2));
+        for (int i = 1; i <= h; i++) {
+            for (int j = 1; j <= w; j++) cout << r.fill << " ";
+            cout << "\n";
+        }
+    }
+
+    void drawTriangle(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        for (int i = 1; i <= n; i++) {
+            for (int j = 1; j <= n - i; j++) cout << "  ";
+            for (int k = 1; k <= 2 * i - 1; k++) {
+                if (!r.hollow || i == n || k == 1 || k == 2 * i - 1)
+                    cout << r.fill << " ";
+                else
+                    cout << "  ";
+            }
+            cout << "\n";
+        }
+    }
+
+    void drawDiamond(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        for (int i = 1; i <= n; i++) {
+            for (int j = 1; j <= n - i; j++) cout << "  ";
+            for (int k = 1; k <= 2 * i - 1; k++) cout << r.fill << " ";
+            cout << "\n";
+        }
+        for (int i = n - 1; i >= 1; i--) {
+            for (int j = 1; j <= n - i; j++) cout << "  ";
+            for (int k = 1; k <= 2 * i - 1; k++) cout << r.fill << " ";
+            cout << "\n";
+        }
+    }
+
+    void drawCircle(const Request& r) {
+        int rad = max(2, static_cast<int>(r.num1));
+        for (int y = rad; y >= -rad; y--) {
+            for (int x = -2 * rad; x <= 2 * rad; x++) {
+                double dist = sqrt((x / 2.0) * (x / 2.0) + y * y);
+                cout << (fabs(dist - rad) <= 1.0 ? r.fill : ' ');
+            }
+            cout << "\n";
+        }
+    }
+
+    void drawStar(const Request& r) {
+        int n = max(3, static_cast<int>(r.num1));
+        for (int i = 1; i <= n; i++) {
+            for (int j = 1; j <= n - i; j++) cout << " ";
+            for (int k = 1; k <= 2 * i - 1; k++) cout << r.fill;
+            cout << "\n";
+        }
+        for (int i = n - 1; i >= 1; i--) {
+            for (int j = 1; j <= n - i; j++) cout << " ";
+            for (int k = 1; k <= 2 * i - 1; k++) cout << r.fill;
+            cout << "\n";
+        }
+    }
+
+    void drawPattern(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        int type = static_cast<int>(r.num2);
+        if (type == 1) {              // Floyd's triangle
+            int counter = 1;
+            for (int i = 1; i <= n; i++) {
+                for (int j = 1; j <= i; j++) cout << counter++ << " ";
+                cout << "\n";
+            }
+        } else if (type == 2) {       // countdown
+            for (int i = n; i >= 1; i--) {
+                for (int j = 1; j <= i; j++) cout << j << " ";
+                cout << "\n";
+            }
+        } else if (type == 3) {       // letters
+            for (int i = 1; i <= n; i++) {
+                for (int j = 1; j <= i; j++)
+                    cout << static_cast<char>('A' + j - 1) << " ";
+                cout << "\n";
+            }
+        } else {                      // default number pattern
+            for (int i = 1; i <= n; i++) {
+                for (int j = 1; j <= i; j++) cout << i << " ";
+                cout << "\n";
+            }
+        }
+    }
+
+    /* ---------- math drawing ---------- */
+    void drawSqrt(const Request& r) {
+        double ans = sqrt(r.num1);
+        cout << "   sqrt(" << r.num1 << ") = " << fixed << setprecision(4) << ans << "\n";
+    }
+
+    void drawPow(const Request& r) {
+        cout << "   " << r.num1 << " ^ " << r.num2 << " = " << fixed
+             << setprecision(0) << pow(r.num1, r.num2) << "\n";
+    }
+
+    void drawFactorial(const Request& r) {
+        int n = max(0, static_cast<int>(r.num1));
+        long long fact = 1;
+        for (int i = 2; i <= n; i++) fact *= i;
+        cout << "   " << n << "! = " << fact << "\n";
+    }
+
+    void drawFibonacci(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        long long a = 0, b = 1;
+        cout << "   ";
+        for (int i = 1; i <= n; i++) {
+            cout << a << (i < n ? ", " : "\n");
+            long long next = a + b;
+            a = b; b = next;
+        }
+    }
+
+    void drawTimesTable(const Request& r) {
+        int n = max(1, static_cast<int>(r.num1));
+        for (int i = 1; i <= 10; i++)
+            cout << "   " << n << " x " << i << " = " << n * i << "\n";
+    }
+
+    void drawPrime(const Request& r) {
+        int n = max(2, static_cast<int>(r.num1));
+        vector<string> dummy = tokenize(r.raw);
+        bool listMode = hasWord(dummy, {"list", "all", "upto", "up", "to", "till", "until", "below"});
+        if (listMode) {
+            cout << "   Primes up to " << n << ": ";
+            for (int num = 2; num <= n; num++) {
+                bool isPrime = true;
+                for (int i = 2; i * i <= num; i++)
+                    if (num % i == 0) { isPrime = false; break; }
+                if (isPrime) cout << num << " ";
+            }
+            cout << "\n";
+        } else {
+            bool isPrime = true;
+            if (n < 2) isPrime = false;
+            for (int i = 2; i * i <= n; i++)
+                if (n % i == 0) { isPrime = false; break; }
+            cout << "   " << n << (isPrime ? " is PRIME." : " is NOT prime.") << "\n";
+        }
+    }
+
+    void drawCalculator(const Request& r) {
+        double a = r.num1, b = r.num2;
+        cout << fixed << setprecision(4);
+        if (b == -5)      cout << "   sin(" << a << ") = " << sin(a) << "\n";
+        else if (b == -6) cout << "   cos(" << a << ") = " << cos(a) << "\n";
+        else if (b == -7) cout << "   tan(" << a << ") = " << tan(a) << "\n";
+        else if (b == -1) cout << "   " << a << " - " << (-b - 1 == 0 ? 0 : 0)
+                                  << " ... (say 'minus' clearly, e.g. 5 minus 3)\n";
+        else if (b == -2) cout << "   " << a << " x ? ... (say 'times', e.g. 5 times 3)\n";
+        else if (b == -3) cout << "   " << a << " / ? ... (say 'divided by', e.g. 10 divided by 2)\n";
+        else if (b == -4) cout << "   " << a << " % ? ... (say 'mod', e.g. 10 mod 3)\n";
+        else              cout << "   " << a << " + " << b << " = " << a + b << "\n";
+    }
+
+    void drawHello(const Request& /*r*/) {
+        cout << "   Hello, World!\n   I am learning C++ with CodeForge AI.\n";
+    }
+};
+/* ================================================================
+   SECTION 4 - FORGE BRAIN  (the orchestrator)
+   Ties the parser, code generator and artist together and handles
+   the conversation with the user.
+   ================================================================ */
+
+class ForgeBrain {
+public:
+    void run() {
+        greet();
+        string line;
+        while (true) {
+            cout << "\nYou: ";
+            if (!getline(cin, line)) break;
+            if (line.empty()) continue;
+
+            Request req = parser.parse(line);
+
+            if (req.intent == Intent::QUIT) {
+                cout << "CodeForge AI: Goodbye! Happy coding!\n";
+                break;
+            }
+            if (req.intent == Intent::HELP || req.intent == Intent::UNKNOWN) {
+                if (req.intent == Intent::UNKNOWN)
+                    cout << "CodeForge AI: I did not understand that, so here is "
+                            "what I CAN do:\n";
+                showHelp();
+                continue;
+            }
+
+            cout << "CodeForge AI: Understood! Here is your code AND the "
+                    "output it will create:\n";
+
+            /* 1) show the generated code */
+            string code = generator.generate(req);
+            printCode(code);
+
+            /* 2) draw the live preview */
+            artist.draw(req);
+
+            /* 3) tell the user how to run it */
+            cout << "  -> Save the code as a .cpp file, then compile and run:\n"
+                 << "        g++ mycode.cpp -o mycode && ./mycode\n"
+                 << "  -> OR paste it into any online C++ compiler.\n";
+        }
+    }
+
+private:
+    ForgeParser   parser;
+    CodeForge     generator;
+    ForgeArtist   artist;
+
+    void greet() {
+        cout << "\n" + string(60, '#') + "\n";
+        cout << "#  CODEFORGE AI v1.0                                    #\n";
+        cout << "#  A local semantic AI: type English, get C++ code!     #\n";
+        cout << "#  All thinking happens on YOUR machine.                #\n";
+        cout << string(60, '#') + "\n";
+        cout << "  Type 'help' to see everything I can do,\n";
+        cout << "  type 'quit' to exit.\n";
+    }
+
+    void showHelp() {
+        cout << "\n" + string(60, '=') + "\n";
+        cout << "  WHAT CODEFORGE AI CAN BUILD FOR YOU\n";
+        cout << string(60, '=') + "\n";
+        cout << "  SHAPES (drawn with nested for-loops)\n";
+        cout << "    square (of size N)        - e.g. \"draw a square of size 5\"\n";
+        cout << "    hollow square             - e.g. \"hollow square size 7\"\n";
+        cout << "    rectangle / box           - e.g. \"rectangle 4 by 8\"\n";
+        cout << "    triangle / pyramid        - e.g. \"pyramid size 6\"\n";
+        cout << "    diamond                   - e.g. \"diamond of size 5\"\n";
+        cout << "    circle / round            - e.g. \"draw a circle radius 6\"\n";
+        cout << "    star                      - e.g. \"star size 5\"\n";
+        cout << "    pattern                   - e.g. \"number pattern 5\"\n";
+        cout << "                             \"floyd pattern 5\"\n";
+        cout << "                             \"countdown pattern 6\"\n";
+        cout << "                             \"letter pattern 4\"\n";
+        cout << "  MATH (using <cmath> functions)\n";
+        cout << "    sqrt of N                 - e.g. \"sqrt of 144\"\n";
+        cout << "    pow / power               - e.g. \"pow 2 to the 10\"\n";
+        cout << "                             \"2 raised to 8\"\n";
+        cout << "                             \"cube of 4\", \"square of 9\"\n";
+        cout << "    factorial                 - e.g. \"factorial of 7\"\n";
+        cout << "    fibonacci                 - e.g. \"fibonacci 12 terms\"\n";
+        cout << "    prime                     - e.g. \"is 29 prime\"\n";
+        cout << "                             \"list primes up to 50\"\n";
+        cout << "    times table               - e.g. \"multiplication table of 12\"\n";
+        cout << "    calculator                - e.g. \"add 99 and 1\"\n";
+        cout << "                             \"sin 1.5\", \"cos 0\", \"tan 0.5\"\n";
+        cout << "  CUSTOMISING\n";
+        cout << "    \"square of size 4 with @\"  -> draws with any character\n";
+        cout << "    \"hollow triangle of 8 with #\"\n";
+        cout << string(60, '=') + "\n";
+    }
+
+    /* print the generated code inside a nice box */
+    void printCode(const string& code) {
+        cout << "\n  +-- GENERATED CODE (copy from here) -------------------------+\n";
+        istringstream stream(code);
+        string line;
+        while (getline(stream, line)) {
+            if (line.empty()) line = " ";
+            cout << "  | " << line;
+            for (size_t i = line.size(); i < 58; i++) cout << " ";
+            cout << " |\n";
+        }
+        cout << "  +--------------------------------------------------------------+\n";
+    }
+};
+
+/* ================================================================
+   SECTION 5 - MAIN
+   ================================================================ */
+int main() {
+    ios_base::sync_with_stdio(false);
+    cin.tie(nullptr);
+    ForgeBrain brain;
+    brain.run();
+    return 0;
+}
